@@ -1,5 +1,4 @@
-from permissioncheck import scan_apk
-from apkdeploy import deploy_to_emulator
+from core import scan_apk, deploy_to_emulator
 
 
 if __name__ == "__main__":
@@ -14,3 +13,12 @@ if __name__ == "__main__":
         )
         if choice == "y":
             deploy_to_emulator(path_input, app_package)
+
+            monitor_choice = (
+                input("\nStart API behavior monitoring (Frida + mitmproxy + logcat)? (y/n): ")
+                .strip()
+                .lower()
+            )
+            if monitor_choice == "y":
+                from monitor import start_all
+                start_all(app_package)

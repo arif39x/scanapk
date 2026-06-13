@@ -1,1 +1,3 @@
 androguard
+frida-tools
+mitmproxy
