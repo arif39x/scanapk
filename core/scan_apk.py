@@ -1,6 +1,6 @@
 import os
-
 from androguard.core.apk import APK
+from core.dex_scan import scan_dex
 
 DANGEROUS_PERMISSIONS = {
     "android.permission.READ_SMS",
@@ -31,39 +31,48 @@ DANGEROUS_PERMISSIONS = {
 }
 
 
-def scan_apk(apk_path):
+def scan_apk(apk_path: str) -> dict | None:
     if not os.path.exists(apk_path):
-        print(f"File not found at {apk_path}")
+        print(f"File not found: {apk_path}")
         return None
 
-    print(f"\nStarting scan for: {os.path.basename(apk_path)}")
+    print(f"\nStarting static scan: {os.path.basename(apk_path)}")
     print("-" * 50)
 
     try:
         a = APK(apk_path)
-
-        print(f"App Name:        {a.get_app_name()}")
-        print(f"Package Name:    {a.get_package()}")
-        print(f"Target SDK:      {a.get_target_sdk_version()}")
-        print("-" * 50)
-
-        permissions = a.get_permissions()
-        print(f"Total Permissions Found: {len(permissions)}")
-
-        dangerous_found = []
-        for perm in permissions:
-            if perm in DANGEROUS_PERMISSIONS:
-                dangerous_found.append(perm)
-
-        if dangerous_found:
-            print("\n Unwanted / Dangerous Permissions Detected:")
-            for perm in dangerous_found:
-                print(f"  --> {perm}")
-        else:
-            print("\n No highly dangerous permissions flagged.")
-
-        return a.get_package()
-
     except Exception as e:
-        print(f" Error processing APK: {e}")
+        print(f"Error parsing APK: {e}")
         return None
+
+    app_name = a.get_app_name()
+    package = a.get_package()
+    target_sdk = a.get_target_sdk_version()
+
+    print(f"App name   : {app_name}")
+    print(f"Package    : {package}")
+    print(f"Target SDK : {target_sdk}")
+
+    all_perms = a.get_permissions()
+    dangerous_found = [p for p in all_perms if p in DANGEROUS_PERMISSIONS]
+
+    print(f"\nPermissions: {len(all_perms)} total, {len(dangerous_found)} dangerous")
+    for p in dangerous_found:
+        print(f"  \u26a0  {p}")
+
+    print("\nRunning DEX analysis...")
+    dex_results = scan_dex(apk_path)
+    print(f"  Suspicious APIs : {len(dex_results['suspicious_apis'])}")
+    print(f"  Embedded URLs   : {len(dex_results['urls'])}")
+    print(f"  Embedded IPs    : {len(dex_results['ips'])}")
+    print(f"  Native libs     : {len(dex_results['native_libs'])}")
+    print(f"  Broadcast recv  : {len(dex_results['receivers'])}")
+
+    return {
+        "app_name": app_name,
+        "package": package,
+        "target_sdk": target_sdk,
+        "all_permissions": all_perms,
+        "dangerous_permissions": dangerous_found,
+        **dex_results,
+    }

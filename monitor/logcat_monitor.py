@@ -16,7 +16,6 @@ SUSPICIOUS_PATTERNS = (
 
 
 def start():
-    """Start logcat monitor filtering suspicious patterns."""
     global _logcat_proc
 
     os.makedirs(MONITOR_DIR, exist_ok=True)
@@ -36,7 +35,6 @@ def start():
 
 
 def stop():
-    """Stop logcat monitor."""
     global _logcat_proc
     if _logcat_proc:
         _logcat_proc.terminate()

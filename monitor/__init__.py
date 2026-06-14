@@ -1,51 +1,161 @@
-import atexit
+import os
+import re
+import threading
+import time
 
-from . import frida_monitor, logcat_monitor, mitm_monitor
+MONITOR_DIR = os.path.expanduser("~/scanapk_monitor")
+DEFAULT_OBSERVE_SECS = 60
 
 
-def start_all(package_name):
+def start_all(package_name: str, observe_secs: int = DEFAULT_OBSERVE_SECS) -> dict:
+    from . import frida_monitor, logcat_monitor, mitm_monitor
+
     print("\n" + "=" * 50)
-    print(" Setting up API behavior monitoring")
+    print(" Starting monitoring suite")
     print("=" * 50)
 
-    ok = True
-    ok &= frida_monitor.install()
-    ok &= mitm_monitor.install()
-    if not ok:
-        print("  Failed to install dependencies")
-        return False
+    frida_monitor.install()
+    mitm_monitor.install()
 
     frida_monitor.push_server()
-    mitm_monitor.start()
-    mitm_monitor.install_cert()
-    mitm_monitor.set_proxy()
-    frida_monitor.attach(package_name)
-    logcat_monitor.start()
 
-    atexit.register(stop_all)
+    print("  [1/5] Starting mitmproxy...", flush=True)
+    mitm_monitor.start()
+    print("  [2/5] Installing CA cert...", flush=True)
+    mitm_monitor.install_cert()
+    print("  [3/5] Setting proxy...", flush=True)
+    mitm_monitor.set_proxy()
+    print("  [4/5] Starting logcat...", flush=True)
+    logcat_monitor.start()
+    print("  [5/5] Attaching Frida hooks...", flush=True)
+    frida_monitor.attach(package_name)
+
+    frida_log = os.path.join(MONITOR_DIR, "frida_hooks.log")
+    mitm_log = os.path.join(MONITOR_DIR, "mitmproxy.log")
+    lc_log = os.path.join(MONITOR_DIR, "logcat_monitor.log")
 
     print("\n" + "-" * 50)
     print(" Monitoring active!")
-    print(f"  Frida hooks:   ~/scanapk_monitor/frida_hooks.log")
-    print(f"  mitmproxy:     ~/scanapk_monitor/mitmproxy.log")
-    print(f"  Traffic dump:  ~/scanapk_monitor/traffic.flow")
-    print(f"  Logcat:        ~/scanapk_monitor/logcat_monitor.log")
+    print(f"  Frida hooks:   {frida_log}")
+    print(f"  mitmproxy:     {mitm_log}")
+    print(f"  Logcat:        {lc_log}")
     print("-" * 50)
-    print("  mitmproxy web UI: mitmweb --listen-port 8081")
-    print("  Press Ctrl+C to stop monitoring")
-    print("-" * 50 + "\n")
-    return True
 
+    print(f"\n  Observing for {observe_secs}s — interact with the app...")
+    print(f"  Live hooks will appear below:\n")
 
-def stop_all():
+    _tail_with_countdown(frida_log, observe_secs)
+
     frida_monitor.stop()
-    mitm_monitor.stop()
     logcat_monitor.stop()
+    mitm_monitor.stop()
+
+    print("\n  Collecting evidence from logs...")
+    evidence = collect_evidence()
+    print(f"  Evidence collected: {sum(len(v) for v in evidence.values())} items")
+    return evidence
 
 
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) < 2:
-        print("Usage: python -m monitor <package_name>")
-        sys.exit(1)
-    start_all(sys.argv[1])
+def collect_evidence() -> dict:
+    return {
+        "frida_hits": _parse_frida_log(),
+        "network_requests": _parse_mitm_log(),
+        "logcat_hits": _parse_logcat(),
+    }
+
+
+# ── Live tail during observation ──────────────────────────────────────────
+
+def _tail_with_countdown(log_path: str, seconds: int):
+    """Show countdown + live Frida hooks as they're written to the log."""
+    stop_event = threading.Event()
+
+    def tail():
+        if not os.path.isfile(log_path):
+            # Wait for file to exist
+            for _ in range(10):
+                if os.path.isfile(log_path) or stop_event.is_set():
+                    break
+                time.sleep(0.5)
+        try:
+            with open(log_path, errors="replace") as f:
+                f.seek(0, os.SEEK_END)
+                while not stop_event.is_set():
+                    line = f.readline()
+                    if line:
+                        line = line.strip()
+                        if line:
+                            print(f"    \u2192 {line[:150]}", flush=True)
+                    else:
+                        time.sleep(0.2)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=tail, daemon=True)
+    t.start()
+
+    for remaining in range(seconds, 0, -1):
+        if remaining <= 10 or remaining % 10 == 0:
+            print(f"  [{remaining:3d}s] ", end="", flush=True)
+        time.sleep(1)
+
+    stop_event.set()
+    t.join(timeout=2)
+    print()
+
+
+# ── Log parsers ───────────────────────────────────────────────────────────
+
+def _parse_frida_log() -> list[dict]:
+    path = os.path.join(MONITOR_DIR, "frida_hooks.log")
+    hits = []
+    if not os.path.isfile(path):
+        return hits
+    pattern = re.compile(r"\[MALMON\]\s+(.+)")
+    with open(path, errors="replace") as f:
+        for line in f:
+            m = pattern.search(line)
+            if m:
+                hits.append({"type": "frida", "detail": m.group(1).strip()})
+    return hits
+
+
+def _parse_mitm_log() -> list[dict]:
+    path = os.path.join(MONITOR_DIR, "mitmproxy.log")
+    requests = []
+    if not os.path.isfile(path):
+        return requests
+    url_pattern = re.compile(r"(GET|POST|PUT|DELETE|PATCH)\s+(https?://\S+)")
+    with open(path, errors="replace") as f:
+        for line in f:
+            m = url_pattern.search(line)
+            if m:
+                requests.append({"method": m.group(1), "url": m.group(2)})
+    seen = set()
+    unique = []
+    for r in requests:
+        key = r["method"] + r["url"]
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    return unique
+
+
+_SUSPICIOUS_LOGCAT = re.compile(
+    r"SmsManager|sendTextMessage|Cipher\.doFinal|Runtime\.exec|"
+    r"DevicePolicyManager|lockNow|wipeData|NotificationListenerService|"
+    r"getLastKnownLocation|getDeviceId|READ_CONTACTS|INSTALL_PACKAGES",
+    re.IGNORECASE,
+)
+
+
+def _parse_logcat() -> list[str]:
+    path = os.path.join(MONITOR_DIR, "logcat_monitor.log")
+    hits = []
+    if not os.path.isfile(path):
+        return hits
+    with open(path, errors="replace") as f:
+        for line in f:
+            if _SUSPICIOUS_LOGCAT.search(line):
+                hits.append(line.strip()[:200])
+    return hits[:100]

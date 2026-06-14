@@ -1,3 +1,5 @@
 androguard
-frida-tools
 mitmproxy
+frida
+openai
+python-dotenv

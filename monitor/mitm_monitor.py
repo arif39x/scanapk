@@ -6,6 +6,7 @@ import time
 
 MONITOR_DIR = os.path.expanduser("~/scanapk_monitor")
 _mitm_proc = None
+_ADB_TIMEOUT = 15
 
 
 def _adb():
@@ -16,7 +17,12 @@ def _adb():
 
 
 def _run(cmd, **kwargs):
-    return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    kwargs.setdefault("timeout", _ADB_TIMEOUT)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    except subprocess.TimeoutExpired:
+        print(f"  \u26a0 Command timed out after {_ADB_TIMEOUT}s: {' '.join(cmd[:3])}...")
+        return None
 
 
 def install():
@@ -24,11 +30,15 @@ def install():
     if shutil.which("mitmdump"):
         return True
     print("  Installing mitmproxy...", flush=True)
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "mitmproxy"],
-        capture_output=True, text=True
-    )
-    return result.returncode == 0
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "mitmproxy"],
+            capture_output=True, text=True, timeout=120,
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        print("  \u2716 mitmproxy install timed out")
+        return False
 
 
 def start():
@@ -38,49 +48,84 @@ def start():
     os.makedirs(MONITOR_DIR, exist_ok=True)
     log_path = os.path.join(MONITOR_DIR, "mitmproxy.log")
     flow_path = os.path.join(MONITOR_DIR, "traffic.flow")
-    log_fd = open(log_path, "w")
 
     print("  Starting mitmdump on port 8080...", flush=True)
     _mitm_proc = subprocess.Popen(
-        [
-            "mitmdump", "--listen-port", "8080",
-            "-w", flow_path,
-            "--set", "block_global=false",
-        ],
-        stdout=log_fd,
-        stderr=subprocess.STDOUT,
-        text=True,
+        ["mitmdump", "--listen-port", "8080", "-w", flow_path,
+         "--set", "block_global=false"],
+        stdout=open(log_path, "w"), stderr=subprocess.STDOUT, text=True,
     )
     time.sleep(2)
-
     print(f"  Traffic log: {log_path}", flush=True)
-    print(f"  Traffic dump: {flow_path}", flush=True)
-    print("  Web UI: mitmweb --listen-port 8081", flush=True)
     return True
+
+
+def _cert_hash_on_host(cert_path: str) -> str | None:
+    """Compute Android-style cert hash using host openssl."""
+    try:
+        result = subprocess.run(
+            ["openssl", "x509", "-inform", "PEM", "-subject_hash_old",
+             "-in", cert_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout.strip().split("\n")[0] if result.stdout.strip() else None
+    except Exception:
+        return None
 
 
 def install_cert():
     """Install mitmproxy CA certificate on the emulator for HTTPS decryption."""
-    ca_cert = os.path.expanduser("~/.mitmproxy/mitmproxy-ca-cert.cer")
-    if not os.path.isfile(ca_cert):
-        print("  mitmproxy CA cert not found — run mitmproxy once to generate it")
+    ca_cert_cer = os.path.expanduser("~/.mitmproxy/mitmproxy-ca-cert.cer")
+    ca_cert_pem = os.path.expanduser("~/.mitmproxy/mitmproxy-ca-cert.pem")
+
+    # Prefer PEM (already exists from mitmproxy), fall back to DER→PEM conversion
+    pem_source = ca_cert_pem if os.path.isfile(ca_cert_pem) else ca_cert_cer
+
+    if not os.path.isfile(pem_source):
+        print("  \u26a0 mitmproxy CA cert not found — run mitmproxy once to generate")
+        print("    HTTPS decryption unavailable, but monitoring continues")
         return False
 
     print("  Installing mitmproxy CA cert on emulator...", flush=True)
-    _run([_adb(), "push", ca_cert, "/data/local/tmp/"])
-    _run([_adb(), "shell",
-          "openssl x509 -inform DER -in /data/local/tmp/mitmproxy-ca-cert.cer "
-          "-out /data/local/tmp/mitmproxy-ca-cert.pem"])
-    hash_result = _run([_adb(), "shell",
-                        "openssl x509 -inform PEM -subject_hash_old "
-                        "-in /data/local/tmp/mitmproxy-ca-cert.pem | head -1"])
-    cert_hash = hash_result.stdout.strip()
-    if not cert_hash:
-        print("  Failed to get cert hash")
-        return False
 
-    _run([_adb(), "shell",
-          f"cp /data/local/tmp/mitmproxy-ca-cert.pem /data/local/tmp/{cert_hash}.0"])
+    # If we only have DER, convert to PEM on host using Python
+    if pem_source == ca_cert_cer:
+        try:
+            subprocess.run(
+                ["openssl", "x509", "-inform", "DER",
+                 "-in", ca_cert_cer, "-out", "/tmp/mitmproxy-ca-cert.pem"],
+                capture_output=True, timeout=10,
+            )
+            pem_source = "/tmp/mitmproxy-ca-cert.pem"
+        except Exception:
+            print("  \u26a0 Host openssl missing — HTTPS decryption unavailable")
+            print("    Install openssl: sudo apt install openssl")
+            return False
+
+    cert_hash = _cert_hash_on_host(pem_source)
+    if not cert_hash:
+        # Fallback: compute hash with Python's hashlib
+        try:
+            import hashlib
+            with open(pem_source, "rb") as f:
+                pem_data = f.read()
+            # Extract subject from PEM and compute old-style MD5 hash
+            import subprocess as sp
+            # Try one more approach — openssl might work with different args
+            result = sp.run(
+                ["openssl", "x509", "-inform", "PEM", "-subject_hash_old",
+                 "-in", pem_source],
+                capture_output=True, text=True, timeout=10,
+            )
+            cert_hash = result.stdout.strip().split("\n")[0] if result.stdout.strip() else None
+        except Exception:
+            pass
+        if not cert_hash:
+            print("  \u26a0 Failed to compute cert hash — HTTPS decryption unavailable")
+            return False
+
+    _run([_adb(), "push", pem_source,
+          f"/data/local/tmp/{cert_hash}.0"])
     _run([_adb(), "shell", "mount", "-o", "remount,rw", "/system"])
     _run([_adb(), "shell",
           f"cp /data/local/tmp/{cert_hash}.0 /system/etc/security/cacerts/"])
@@ -93,13 +138,13 @@ def install_cert():
 def set_proxy():
     """Route emulator traffic through host mitmproxy."""
     print("  Setting emulator proxy to 10.0.2.2:8080...", flush=True)
-    _run([_adb(), "shell", "settings", "put", "global", "http_proxy", "10.0.2.2:8080"])
+    _run([_adb(), "shell", "settings", "put", "global", "http_proxy",
+          "10.0.2.2:8080"])
 
 
 def unset_proxy():
     """Remove proxy from emulator."""
     _run([_adb(), "shell", "settings", "delete", "global", "http_proxy"])
-    print("  Proxy removed", flush=True)
 
 
 def stop():
