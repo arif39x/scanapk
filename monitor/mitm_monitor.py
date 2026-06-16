@@ -49,9 +49,13 @@ def start():
     log_path = os.path.join(MONITOR_DIR, "mitmproxy.log")
     flow_path = os.path.join(MONITOR_DIR, "traffic.flow")
 
+    venv_mitmdump = os.path.join(os.path.dirname(sys.executable), "mitmdump")
+    if not os.path.isfile(venv_mitmdump):
+        venv_mitmdump = "mitmdump"
+
     print("  Starting mitmdump on port 8080...", flush=True)
     _mitm_proc = subprocess.Popen(
-        ["mitmdump", "--listen-port", "8080", "-w", flow_path,
+        [venv_mitmdump, "--listen-port", "8080", "-w", flow_path,
          "--set", "block_global=false"],
         stdout=open(log_path, "w"), stderr=subprocess.STDOUT, text=True,
     )
