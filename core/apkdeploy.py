@@ -4,7 +4,6 @@ import subprocess
 import sys
 import time
 
-
 EMULATOR_NAME = "scanapk_test"
 SYSTEM_IMAGE = "system-images;android-30;google_apis;x86_64"
 
@@ -35,7 +34,9 @@ def _emulator_path():
     candidates = [
         shutil.which("emulator"),
         os.path.join(sdk, "emulator", "emulator"),
-        os.path.join(sdk, "emulator", "qemu", "linux-x86_64", "qemu-system-x86_64-headless"),
+        os.path.join(
+            sdk, "emulator", "qemu", "linux-x86_64", "qemu-system-x86_64-headless"
+        ),
     ]
     for c in candidates:
         if c and os.path.isfile(c):
@@ -114,11 +115,13 @@ def install_sdk():
 
     print("  Downloading command-line tools...", flush=True)
     import urllib.request
+
     urllib.request.urlretrieve(url, zip_path)
 
     print("  Extracting...", flush=True)
-    import zipfile
     import shutil
+    import zipfile
+
     extract_dir = os.path.join(sdk, "cmdline-tools")
     if os.path.isdir(extract_dir):
         shutil.rmtree(extract_dir)
@@ -135,12 +138,17 @@ def install_sdk():
     os.chmod(sdkmanager, 0o755)
 
     print("  Accepting licenses...", flush=True)
-    subprocess.run(f"yes 2>/dev/null | '{sdkmanager}' --licenses", shell=True,
-                   env=_env(), capture_output=True)
+    subprocess.run(
+        f"yes 2>/dev/null | '{sdkmanager}' --licenses",
+        shell=True,
+        env=_env(),
+        capture_output=True,
+    )
 
     print("  Installing platform-tools and emulator...", flush=True)
-    subprocess.run([sdkmanager, "platform-tools", "emulator"],
-                   env=_env(), capture_output=True)
+    subprocess.run(
+        [sdkmanager, "platform-tools", "emulator"], env=_env(), capture_output=True
+    )
 
     avdmanager = _avdmanager_path()
     if avdmanager:
@@ -168,7 +176,17 @@ def ensure_avd():
 
     print(f"  Creating AVD '{EMULATOR_NAME}'...", flush=True)
     result = _run(
-        [avdmanager, "create", "avd", "-n", EMULATOR_NAME, "-k", SYSTEM_IMAGE, "-d", "pixel_6"],
+        [
+            avdmanager,
+            "create",
+            "avd",
+            "-n",
+            EMULATOR_NAME,
+            "-k",
+            SYSTEM_IMAGE,
+            "-d",
+            "pixel_6",
+        ],
         env=_env(),
         input="no",
     )
@@ -191,8 +209,17 @@ def start_emulator():
     emulator = _emulator_path()
     print(f"  Launching emulator: {emulator}", flush=True)
     subprocess.Popen(
-        [emulator, "-avd", EMULATOR_NAME, "-no-audio", "-gpu", "swiftshader_indirect",
-         "-no-snapshot", "-memory", "2048"],
+        [
+            emulator,
+            "-avd",
+            EMULATOR_NAME,
+            "-no-audio",
+            "-gpu",
+            "swiftshader_indirect",
+            "-no-snapshot",
+            "-memory",
+            "2048",
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=_env(),
@@ -218,15 +245,24 @@ def deploy_to_emulator(apk_path, package_name):
     if "Success" in install_proc.stdout:
         print("-> Installation successful!")
     else:
-        print(f"-> Installation failed.\nADB: {install_proc.stdout}{install_proc.stderr}")
+        print(
+            f"-> Installation failed.\nADB: {install_proc.stdout}{install_proc.stderr}"
+        )
         return False
 
     print(f"  Launching {package_name}...")
-    launch_proc = _run([
-        _adb(), "shell", "monkey",
-        "-p", package_name,
-        "-c", "android.intent.category.LAUNCHER", "1",
-    ])
+    launch_proc = _run(
+        [
+            _adb(),
+            "shell",
+            "monkey",
+            "-p",
+            package_name,
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1",
+        ]
+    )
 
     if launch_proc.returncode == 0:
         print("-> App successfully launched on the emulator!")

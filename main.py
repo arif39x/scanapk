@@ -59,15 +59,16 @@ def main():
 
     ai_result = {}
     if not args.no_ai:
-        if not os.environ.get("OPENROUTER_API_KEY"):
-            print("\nOPENROUTER_API_KEY not set.")
+        from core.models import get_models
+        if not get_models():
+            print("\nNo OpenRouter API keys found in .env.")
             skip = input("Skip AI analysis? (y/n): ").strip().lower()
             if skip != "y":
                 key = input("Paste your OpenRouter API key: ").strip()
                 os.environ["OPENROUTER_API_KEY"] = key
 
-        if os.environ.get("OPENROUTER_API_KEY"):
-            print("\nRunning agentic analysis with Nemotron 3 Ultra...")
+        if get_models():
+            print("\nRunning agentic analysis...")
             from core.agent import analyse
             ai_result = analyse(
                 apk_path=apk_path,

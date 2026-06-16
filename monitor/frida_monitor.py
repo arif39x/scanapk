@@ -1,3 +1,4 @@
+import glob
 import itertools
 import os
 import shutil
@@ -12,8 +13,12 @@ FRIDA_URL = (
 )
 FRIDA_BIN = f"frida-server-{FRIDA_VER}-android-x86_64"
 MONITOR_DIR = os.path.expanduser("~/scanapk_monitor")
-HOOKS_FILE = os.path.join(os.path.dirname(__file__), "hooks.js")
+HOOKS_DIR = os.path.join(os.path.dirname(__file__), "frida_hooks")
 _frida_proc = None
+
+
+def _get_hook_files():
+    return sorted(glob.glob(os.path.join(HOOKS_DIR, "*.js")))
 
 
 def _adb():
@@ -120,8 +125,9 @@ def attach(package_name):
     """Attach Frida hooks to a running app."""
     global _frida_proc
 
-    if not os.path.isfile(HOOKS_FILE):
-        print(f"  hooks.js not found at {HOOKS_FILE}")
+    hook_files = _get_hook_files()
+    if not hook_files:
+        print(f"  No hook scripts found in {HOOKS_DIR}")
         return False
 
     pid = None
@@ -152,9 +158,12 @@ def attach(package_name):
     if not os.path.isfile(venv_frida):
         venv_frida = "frida"
 
-    print(f"  Attaching Frida hooks to {package_name} (PID: {pid})...", flush=True)
+    print(f"  Attaching {len(hook_files)} Frida hook scripts to {package_name} (PID: {pid})...", flush=True)
+    cmd = [venv_frida, "-U", "-p", pid]
+    for f in hook_files:
+        cmd.extend(["-l", f])
     _frida_proc = subprocess.Popen(
-        [venv_frida, "-U", "-p", pid, "-l", HOOKS_FILE],
+        cmd,
         stdout=log_fd,
         stderr=subprocess.STDOUT,
         text=True,

@@ -2,19 +2,30 @@ import json
 import os
 import re
 
-from core.models import resolve
+from core.knowledge_graph import build_graph
+from core.models import get_models
 from core.tools import TOOL_DEFINITIONS, execute_tool
 
 _SYSTEM_PROMPT = """You are a mobile malware analyst at a bank's cybersecurity team.
-You have access to Android APK analysis tools. Your job is to:
+You have access to Android APK analysis tools.
 
-1. Systematically gather evidence from the APK using the available tools
-2. Analyze permissions, embedded URLs/IPs, suspicious API calls, manifest components, and string patterns
-3. Think step by step about what each finding means in context
-4. When you have enough evidence, produce a FINAL structured assessment
+Use Chain-of-Thought reasoning. Always structure your analysis in three phases:
 
-Always call tools to gather evidence before concluding. Once you have sufficient information,
-produce your final assessment as valid JSON with this exact schema (no markdown fences):
+## Phase 1: Catalog
+List every finding from the knowledge graph — permissions, APIs, URLs, IPs, components, dynamic hits.
+
+## Phase 2: Reason
+Analyze what each finding means. Ask yourself:
+- What can this permission/API enable?
+- Which findings form a dangerous combination?
+- What threat category does each pattern match?
+
+## Phase 3: Assess
+Score and classify based on your reasoning above.
+
+The knowledge graph contains all available static and dynamic evidence.
+Call tools only if you need deeper investigation beyond what is provided.
+Once you have sufficient information, call `finalize_assessment` with valid JSON:
 
 {
   "risk_score": <int 0-100>,
@@ -28,9 +39,7 @@ produce your final assessment as valid JSON with this exact schema (no markdown 
 }
 
 Risk score: 0-20 clean, 21-40 suspicious, 41-60 likely malicious, 61-80 high confidence malicious, 81-100 confirmed malware.
-Be conservative — a banking app legitimately needs INTERNET + READ_PHONE_STATE.
-
-When you are ready to produce the final assessment, call the `finalize_assessment` tool with the JSON as the `report` parameter."""
+Be conservative — a banking app legitimately needs INTERNET + READ_PHONE_STATE."""
 
 
 def analyse(
@@ -39,49 +48,63 @@ def analyse(
     evidence: dict | None = None,
     max_tool_rounds: int = 20,
 ) -> dict:
-    from openai import OpenAI
+    from openai import OpenAI, APIStatusError
 
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        return _error("OPENROUTER_API_KEY not set")
+    models = get_models()
+    if not models:
+        return _error("No API keys configured")
 
-    _, model_id = resolve()
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-        default_headers={
-            "HTTP-Referer": "https://github.com/scanapk",
-            "X-Title": "ScanAPK",
-        },
-    )
+    clients: list[tuple[OpenAI, str]] = []
+    for model_id, key_env in models:
+        key = os.environ.get(key_env)
+        if key:
+            clients.append((
+                OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=key,
+                    default_headers={
+                        "HTTP-Referer": "https://github.com/scanapk",
+                        "X-Title": "ScanAPK",
+                    },
+                ),
+                model_id,
+            ))
+
+    if not clients:
+        return _error("No API keys configured")
 
     tools = TOOL_DEFINITIONS + [_FINALIZE_TOOL]
 
+    kg = build_graph(apk_path, static_info, evidence)
     msgs = [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {
             "role": "user",
-            "content": (
-                f"Analyse this APK for malware indicators:\n\n"
-                f"Path: {apk_path}\n"
-                f"Package: {static_info.get('package', '?')}\n"
-                f"App name: {static_info.get('app_name', '?')}\n\n"
-                + (_format_dynamic_evidence(evidence) if evidence else "Dynamic analysis was not performed.")
-            ),
+            "content": f"Analyse this APK for malware indicators:\n\n{kg}",
         },
     ]
 
     for _ in range(max_tool_rounds):
-        try:
-            resp = client.chat.completions.create(
-                model=model_id,
-                messages=msgs,
-                tools=tools,
-                temperature=0.1,
-                max_tokens=8192,
-            )
-        except Exception as e:
-            return _error(str(e))
+        resp = None
+        for client, model_id in clients:
+            try:
+                resp = client.chat.completions.create(
+                    model=model_id,
+                    messages=msgs,
+                    tools=tools,
+                    temperature=0.1,
+                    max_tokens=8192,
+                )
+                break
+            except APIStatusError as e:
+                if e.status_code == 402:
+                    continue
+                return _error(str(e))
+            except Exception as e:
+                return _error(str(e))
+
+        if resp is None:
+            return _error("All models exhausted — no credits available for any provider")
 
         msg = resp.choices[0].message
         msgs.append(msg)
@@ -124,26 +147,6 @@ def analyse(
             })
 
     return _error("Agent reached max tool call rounds without finalizing.")
-
-
-def _format_dynamic_evidence(evidence: dict) -> str:
-    parts = []
-    frida = evidence.get("frida_hits", [])
-    network = evidence.get("network_requests", [])
-    logcat = evidence.get("logcat_hits", [])
-    if frida:
-        parts.append("Frida hooks fired:")
-        for h in frida[:15]:
-            parts.append(f"  - {h.get('detail', h)}")
-    if network:
-        parts.append("Network requests observed:")
-        for r in network[:10]:
-            parts.append(f"  - {r.get('method', '?')} {r.get('url', r)}")
-    if logcat:
-        parts.append("Suspicious logcat lines:")
-        for l in logcat[:10]:
-            parts.append(f"  - {l}")
-    return "\n".join(parts) if parts else "No dynamic evidence collected."
 
 
 _FINALIZE_TOOL = {

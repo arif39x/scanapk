@@ -4,11 +4,14 @@ import re
 
 from openai import OpenAI
 
-_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+from core.knowledge_graph import build_graph
+from core.models import get_models
 
 _SYSTEM_PROMPT = """You are a mobile malware analyst at a bank's cybersecurity team.
 You receive structured evidence from static and dynamic analysis of Android APK files
 and must produce a precise, actionable threat assessment.
+
+All evidence is provided below as a knowledge graph (APP/PERM/API/URL/IP/RECV/SVC/LIB/FRIDA/NET/LOGCAT triples).
 
 Always respond with valid JSON only — no markdown fences, no preamble.
 Schema:
@@ -31,58 +34,42 @@ Risk score guidance:
   81-100 Confirmed malware / critical threat"""
 
 
-def analyse(evidence: dict, static_info: dict) -> dict:
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        return _error("OPENROUTER_API_KEY not set")
+def analyse(apk_path: str, static_info: dict, evidence: dict | None = None) -> dict:
+    models = get_models()
+    if not models:
+        return _error("No API keys configured")
 
-    payload = _build_payload(evidence, static_info)
-    prompt = "Analyse this Android APK evidence and return your assessment as JSON:\n\n" + json.dumps(payload, indent=2)
+    kg = build_graph(apk_path, static_info, evidence)
+    prompt = f"Analyse this Android APK evidence and return your assessment as JSON:\n\n{kg}"
 
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-        default_headers={"HTTP-Referer": "https://github.com/scanapk", "X-Title": "ScanAPK"},
-    )
-    try:
-        resp = client.chat.completions.create(
-            model=_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            max_tokens=2048,
+    for model_id, key_env in models:
+        key = os.environ.get(key_env)
+        if not key:
+            continue
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=key,
+            default_headers={"HTTP-Referer": "https://github.com/scanapk", "X-Title": "ScanAPK"},
         )
-        raw = resp.choices[0].message.content.strip()
-        return _parse_json(raw)
-    except Exception as e:
-        return _error(str(e))
+        try:
+            resp = client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2048,
+            )
+            raw = resp.choices[0].message.content.strip()
+            return _parse_json(raw)
+        except Exception as e:
+            err_str = str(e)
+            if "402" in err_str or "credits" in err_str.lower():
+                continue
+            return _error(err_str)
 
-
-def _build_payload(evidence: dict, static_info: dict) -> dict:
-    return {
-        "app": {
-            "name": static_info.get("app_name"),
-            "package": static_info.get("package"),
-            "target_sdk": static_info.get("target_sdk"),
-        },
-        "static": {
-            "dangerous_permissions": static_info.get("dangerous_permissions", []),
-            "suspicious_apis": static_info.get("suspicious_apis", []),
-            "embedded_urls": static_info.get("urls", [])[:20],
-            "embedded_ips": static_info.get("ips", [])[:10],
-            "receivers": static_info.get("receivers", []),
-            "services": static_info.get("services", []),
-            "native_libs": static_info.get("native_libs", []),
-            "raw_strings_sample": static_info.get("raw_strings_sample", [])[:15],
-        },
-        "dynamic": {
-            "frida_hits": [h["detail"] for h in evidence.get("frida_hits", [])][:30],
-            "network_requests": evidence.get("network_requests", [])[:20],
-            "logcat_hits": evidence.get("logcat_hits", [])[:30],
-        },
-    }
+    return _error("All models exhausted — no credits available for any provider")
 
 
 def _parse_json(raw: str) -> dict:
