@@ -39,7 +39,9 @@ Once you have sufficient information, call `finalize_assessment` with valid JSON
 }
 
 Risk score: 0-20 clean, 21-40 suspicious, 41-60 likely malicious, 61-80 high confidence malicious, 81-100 confirmed malware.
-Be conservative — a banking app legitimately needs INTERNET + READ_PHONE_STATE."""
+Be conservative — a banking app legitimately needs INTERNET + READ_PHONE_STATE.
+
+IMPORTANT: Always show your step-by-step reasoning in the message content before calling any tool. Your reasoning is visible to the user."""
 
 
 def analyse(
@@ -48,7 +50,7 @@ def analyse(
     evidence: dict | None = None,
     max_tool_rounds: int = 20,
 ) -> dict:
-    from openai import OpenAI, APIStatusError
+    from openai import APIStatusError, OpenAI
 
     models = get_models()
     if not models:
@@ -58,17 +60,19 @@ def analyse(
     for model_id, key_env in models:
         key = os.environ.get(key_env)
         if key:
-            clients.append((
-                OpenAI(
-                    base_url="https://openrouter.ai/api/v1",
-                    api_key=key,
-                    default_headers={
-                        "HTTP-Referer": "https://github.com/scanapk",
-                        "X-Title": "ScanAPK",
-                    },
-                ),
-                model_id,
-            ))
+            clients.append(
+                (
+                    OpenAI(
+                        base_url="https://openrouter.ai/api/v1",
+                        api_key=key,
+                        default_headers={
+                            "HTTP-Referer": "https://github.com/scanapk",
+                            "X-Title": "ScanAPK",
+                        },
+                    ),
+                    model_id,
+                )
+            )
 
     if not clients:
         return _error("No API keys configured")
@@ -104,10 +108,15 @@ def analyse(
                 return _error(str(e))
 
         if resp is None:
-            return _error("All models exhausted — no credits available for any provider")
+            return _error(
+                "All models exhausted — no credits available for any provider"
+            )
 
         msg = resp.choices[0].message
         msgs.append(msg)
+
+        if msg.content:
+            print(f"\n  {msg.content}")
 
         if not msg.tool_calls:
             return _try_extract_report(msg.content)
@@ -115,6 +124,7 @@ def analyse(
         for tc in msg.tool_calls:
             fn = tc.function
             if fn.name == "finalize_assessment":
+                print("\n  [Finalizing assessment...]")
                 try:
                     args = json.loads(fn.arguments)
                     raw = args.get("report", {})
@@ -128,10 +138,16 @@ def analyse(
                         pass
                     try:
                         import ast
+
                         return ast.literal_eval(raw)
                     except (ValueError, SyntaxError):
                         pass
-                    fixed = raw.replace("'", '"').replace("None", "null").replace("True", "true").replace("False", "false")
+                    fixed = (
+                        raw.replace("'", '"')
+                        .replace("None", "null")
+                        .replace("True", "true")
+                        .replace("False", "false")
+                    )
                     try:
                         return json.loads(fixed)
                     except json.JSONDecodeError:
@@ -139,12 +155,18 @@ def analyse(
                     return _error(f"Could not parse report JSON:\n{raw[:300]}")
                 return raw
 
-            result = execute_tool(fn.name, apk_path, **(json.loads(fn.arguments) if fn.arguments else {}))
-            msgs.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result,
-            })
+            args = json.loads(fn.arguments) if fn.arguments else {}
+            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+            print(f"\n  > Calling tool: {fn.name}({args_str})")
+            result = execute_tool(fn.name, apk_path, **args)
+            print(f"  < Result: {result[:200]}{'...' if len(result) > 200 else ''}")
+            msgs.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                }
+            )
 
     return _error("Agent reached max tool call rounds without finalizing.")
 
