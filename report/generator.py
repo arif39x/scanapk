@@ -2,7 +2,7 @@ import json
 import os
 import time
 
-REPORT_DIR = os.path.expanduser("~/scanapk_monitor")
+REPORT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def generate(static_info: dict, ai_result: dict, output_dir: str = REPORT_DIR) -> str:
