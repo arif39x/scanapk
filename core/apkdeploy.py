@@ -4,8 +4,38 @@ import subprocess
 import sys
 import time
 
+from androguard.core.apk import APK
+
 EMULATOR_NAME = "scanapk_test"
 SYSTEM_IMAGE = "system-images;android-30;google_apis;x86_64"
+
+MONKEY_EVENTS = 500
+BOOT_SETTLE_SECS = 4
+
+_DANGEROUS_PERMISSIONS = {
+    "android.permission.READ_SMS",
+    "android.permission.RECEIVE_SMS",
+    "android.permission.SEND_SMS",
+    "android.permission.READ_PHONE_STATE",
+    "android.permission.READ_CONTACTS",
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.RECORD_AUDIO",
+    "android.permission.CAMERA",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.PROCESS_OUTGOING_CALLS",
+    "android.permission.BIND_ACCESSIBILITY_SERVICE",
+    "android.permission.SYSTEM_ALERT_WINDOW",
+    "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
+    "android.permission.QUERY_ALL_PACKAGES",
+    "android.permission.REQUEST_INSTALL_PACKAGES",
+    "android.permission.REQUEST_DELETE_PACKAGES",
+    "android.permission.BIND_DEVICE_ADMIN",
+    "android.permission.READ_MEDIA_IMAGES",
+    "android.permission.READ_MEDIA_VIDEO",
+    "android.permission.READ_MEDIA_AUDIO",
+}
 
 
 def _run(cmd, **kwargs):
@@ -235,6 +265,55 @@ def start_emulator():
     return True
 
 
+def _find_launchable_activity(apk_path):
+    try:
+        a = APK(apk_path)
+        for activity in a.get_activities():
+            filters = a.get_intent_filters("activity", activity)
+            if not filters:
+                continue
+            actions = filters.get("action", [])
+            categories = filters.get("category", [])
+            if (
+                "android.intent.action.MAIN" in actions
+                and "android.intent.category.LAUNCHER" in categories
+            ):
+                pkg = a.get_package()
+                if activity.startswith("."):
+                    activity = pkg + activity
+                return f"{pkg}/{activity}"
+    except Exception:
+        pass
+    return None
+
+
+def _get_dangerous_permissions(apk_path):
+    try:
+        a = APK(apk_path)
+        return [p for p in a.get_permissions() if p in _DANGEROUS_PERMISSIONS]
+    except Exception:
+        return []
+
+
+def _has_boot_receiver(apk_path):
+    try:
+        a = APK(apk_path)
+        receivers = a.get_receivers()
+        for r in receivers:
+            filters = a.get_intent_filters("receiver", r)
+            if not filters:
+                continue
+            actions = filters.get("action", [])
+            if "android.intent.action.BOOT_COMPLETED" in actions:
+                return True
+        perms = a.get_permissions()
+        if "android.permission.RECEIVE_BOOT_COMPLETED" in perms:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def deploy_to_emulator(apk_path, package_name):
     if not start_emulator():
         return False
@@ -250,23 +329,153 @@ def deploy_to_emulator(apk_path, package_name):
         )
         return False
 
-    print(f"  Launching {package_name}...")
-    launch_proc = _run(
-        [
+    launched = False
+    try:
+        launch_target = _find_launchable_activity(apk_path)
+        if launch_target:
+            print(f"  Phase 1: Launching via explicit intent ({launch_target})...")
+            launch_proc = _run(
+                [
+                    _adb(),
+                    "shell",
+                    "am",
+                    "start",
+                    "-n",
+                    launch_target,
+                ]
+            )
+            launched = launch_proc.returncode == 0
+            if launched:
+                print("-> Phase 1: App launched via explicit intent.")
+            else:
+                print(
+                    f"-> Phase 1: Explicit intent failed ({launch_proc.stderr.strip()}). Falling back to monkey."
+                )
+        else:
+            print("  Phase 1: No launchable activity found, falling back to monkey.")
+    except Exception as e:
+        print(f"-> Phase 1: Error resolving activity ({e}). Falling back to monkey.")
+
+    if not launched:
+        try:
+            print("  Phase 1: Launching via monkey fallback...")
+            launch_proc = _run(
+                [
+                    _adb(),
+                    "shell",
+                    "monkey",
+                    "-p",
+                    package_name,
+                    "-c",
+                    "android.intent.category.LAUNCHER",
+                    "1",
+                ]
+            )
+            launched = launch_proc.returncode == 0
+            if launched:
+                print("-> Phase 1: App launched via monkey.")
+            else:
+                print(
+                    f"-> Phase 1: Monkey launch failed ({launch_proc.stderr.strip()})"
+                )
+        except Exception as e:
+            print(f"-> Phase 1: Monkey fallback error ({e})")
+
+    if not launched:
+        print("-> Phase 1: Could not launch the app.")
+        return False
+
+    try:
+        print(f"  Phase 2: Waiting {BOOT_SETTLE_SECS}s for app to settle...")
+        time.sleep(BOOT_SETTLE_SECS)
+        print("-> Phase 2: Settle delay complete.")
+    except Exception as e:
+        print(f"-> Phase 2: Settle delay error ({e})")
+
+    try:
+        print(f"  Phase 3: Running monkey with {MONKEY_EVENTS} random events...")
+        monkey_cmd = [
             _adb(),
             "shell",
             "monkey",
             "-p",
             package_name,
-            "-c",
-            "android.intent.category.LAUNCHER",
-            "1",
+            "--pct-touch",
+            "40",
+            "--pct-motion",
+            "20",
+            "--pct-nav",
+            "10",
+            "--throttle",
+            "150",
+            "--ignore-crashes",
+            "--ignore-timeouts",
+            "--ignore-security-exceptions",
+            str(MONKEY_EVENTS),
         ]
-    )
+        monkey_proc = _run(monkey_cmd, timeout=120)
+        if monkey_proc.returncode == 0:
+            print("-> Phase 3: Monkey interaction complete.")
+        else:
+            stderr = monkey_proc.stderr.strip()
+            if "No events generated" in stderr:
+                print(
+                    "-> Phase 3: Monkey finished (no injectable events, UI may be blocked)."
+                )
+            else:
+                print(f"-> Phase 3: Monkey exited with warnings ({stderr[:200]})")
+    except subprocess.TimeoutExpired:
+        print("-> Phase 3: Monkey timed out after 120s — continuing.")
+    except Exception as e:
+        print(f"-> Phase 3: Monkey error ({e})")
 
-    if launch_proc.returncode == 0:
-        print("-> App successfully launched on the emulator!")
-        return True
-    else:
-        print(f"-> Failed to launch.\nADB: {launch_proc.stderr}")
-        return False
+    try:
+        dangerous = _get_dangerous_permissions(apk_path)
+        if dangerous:
+            print(f"  Phase 4: Granting {len(dangerous)} dangerous permission(s)...")
+            granted = 0
+            for perm in dangerous:
+                result = _run(
+                    [
+                        _adb(),
+                        "shell",
+                        "pm",
+                        "grant",
+                        package_name,
+                        perm,
+                    ]
+                )
+                if result.returncode == 0:
+                    granted += 1
+            print(f"-> Phase 4: Granted {granted}/{len(dangerous)} permission(s).")
+        else:
+            print("  Phase 4: No dangerous permissions to grant.")
+    except Exception as e:
+        print(f"-> Phase 4: Permission grant error ({e})")
+
+    try:
+        if _has_boot_receiver(apk_path):
+            print("  Phase 5: Sending BOOT_COMPLETED broadcast...")
+            broadcast_proc = _run(
+                [
+                    _adb(),
+                    "shell",
+                    "am",
+                    "broadcast",
+                    "-a",
+                    "android.intent.action.BOOT_COMPLETED",
+                    "-p",
+                    package_name,
+                ]
+            )
+            if broadcast_proc.returncode == 0:
+                print("-> Phase 5: BOOT_COMPLETED broadcast sent.")
+            else:
+                print(f"-> Phase 5: Broadcast failed ({broadcast_proc.stderr.strip()})")
+        else:
+            print("  Phase 5: No BOOT_COMPLETED receiver — skipping.")
+    except Exception as e:
+        print(f"-> Phase 5: Broadcast error ({e})")
+
+    print("-> Interaction phases complete. App is running on the emulator.")
+    return True
