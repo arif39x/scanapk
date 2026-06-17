@@ -1,4 +1,4 @@
-# <img src="asset/scanapkmascot.png" width="100" align="center"> ScanAPK
+# <img src="asset/scanapkmascot.png" width="100%" align="center"> ScanAPK
 
 **ScanAPK** is an advanced, AI-powered Android malware analysis tool that combines static scanning, dynamic monitoring, and agentic AI reasoning to provide comprehensive security assessments of APK files.
 

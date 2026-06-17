@@ -5,6 +5,10 @@ import time
 REPORT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _verdict(severity: str) -> str:
+    return {"CLEAN": "INSTALL", "LOW": "REVIEW"}.get(severity.upper(), "DO_NOT_INSTALL")
+
+
 def generate(static_info: dict, ai_result: dict, output_dir: str = REPORT_DIR) -> str:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -16,6 +20,7 @@ def generate(static_info: dict, ai_result: dict, output_dir: str = REPORT_DIR) -
     report = {
         "schema_version": "1.0",
         "generated_at": ts,
+        "verdict": _verdict(ai_result.get("severity", "")),
         "app": {
             "name": static_info.get("app_name"),
             "package": static_info.get("package"),
@@ -55,6 +60,7 @@ def _print_summary(report: dict):
     print("=" * 60)
     print(f"  Risk score : [{bar}] {score}/100")
     print(f"  Severity   : {severity}")
+    print(f"  Verdict    : {_verdict(severity)}")
     print(f"  Family     : {family}")
     print(f"  Confidence : {a.get('confidence', '?')}")
     print()
