@@ -24,6 +24,13 @@ Analyze what each finding means. Ask yourself:
 Score and classify based on your reasoning above.
 
 The knowledge graph contains all available static and dynamic evidence.
+TECH entries flag known evasion techniques detected during monitoring (e.g. Delayed Execution, Dropper/Two-Stage, Payload Download).
+
+**Evasion Detection Guidance:**
+- `Delayed Execution`: Look for timers, Thread.sleep, postDelayed, UI event listeners (OnClickListener) followed by suspicious activity. This means the malware waits for human interaction before activating.
+- `Dropper / Two-Stage`: Look for InMemoryDexClassLoader, DexClassLoader loading from network paths, or Class.forName + Method.invoke patterns. This means the clean APK downloads malicious code at runtime.
+- `Payload Download`: Look for DownloadManager requests or large HTTP responses (>10KB). The app may be fetching encrypted/encoded payloads from a C2 server.
+
 Call tools only if you need deeper investigation beyond what is provided.
 Once you have sufficient information, call `finalize_assessment` with valid JSON:
 

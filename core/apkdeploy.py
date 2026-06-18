@@ -7,7 +7,7 @@ import time
 from androguard.core.apk import APK
 
 EMULATOR_NAME = "scanapk_test"
-SYSTEM_IMAGE = "system-images;android-30;google_apis;x86_64"
+SYSTEM_IMAGE = "system-images;android-30;default;x86_64"
 
 MONKEY_EVENTS = 500
 BOOT_SETTLE_SECS = 4
@@ -215,12 +215,17 @@ def ensure_avd():
             "-k",
             SYSTEM_IMAGE,
             "-d",
-            "pixel_6",
+            "Nexus 5X",
         ],
         env=_env(),
         input="no",
     )
     return result.returncode == 0
+
+
+def _emulator_booted():
+    result = _run([_adb(), "shell", "getprop", "sys.boot_completed"], timeout=10)
+    return result and result.stdout.strip() == "1"
 
 
 def start_emulator():
@@ -229,7 +234,15 @@ def start_emulator():
     print("=" * 50)
 
     if emulator_running():
-        print("-> Killing existing emulator...")
+        if _emulator_booted():
+            print("-> Found running emulator — reusing it.")
+            _spoof_build_props()
+            return True
+        print("-> Emulator is running but not fully booted — waiting...")
+        if wait_for_boot():
+            _spoof_build_props()
+            return True
+        print("-> Running emulator seems stuck — recycling.")
         _run([_adb(), "emu", "kill"])
         time.sleep(5)
 
@@ -246,7 +259,6 @@ def start_emulator():
             "-no-audio",
             "-gpu",
             "swiftshader_indirect",
-            "-no-snapshot",
             "-memory",
             "2048",
         ],
@@ -261,8 +273,32 @@ def start_emulator():
         print("-> Failed to boot emulator")
         return False
 
+    _spoof_build_props()
+
     print("-> Emulator is ready")
     return True
+
+
+def _spoof_build_props():
+    print("  Spoofing build properties...", end="", flush=True)
+    try:
+        props = [
+            ("ro.product.manufacturer", "samsung"),
+            ("ro.product.model", "SM-G991B"),
+            ("ro.product.brand", "samsung"),
+            ("ro.product.name", "beyond1"),
+            ("ro.build.fingerprint", "samsung/beyond1/beyond1:11/RP1A.200720.012/G991BXXU3CUID:user/release-keys"),
+            ("ro.build.tags", "release-keys"),
+            ("ro.build.type", "user"),
+            ("ro.debuggable", "0"),
+            ("ro.secure", "1"),
+            ("ro.product.device", "beyond1"),
+        ]
+        for key, value in props:
+            _run([_adb(), "shell", "setprop", key, value])
+        print(" -> Build props spoofed")
+    except Exception as e:
+        print(f" -> Warning: build prop spoofing failed ({e})")
 
 
 def _find_launchable_activity(apk_path):
@@ -314,20 +350,26 @@ def _has_boot_receiver(apk_path):
     return False
 
 
+def _already_installed(package_name: str) -> bool:
+    result = _run([_adb(), "shell", "pm", "list", "packages", package_name], timeout=10)
+    return bool(result and package_name in result.stdout)
+
+
 def deploy_to_emulator(apk_path, package_name):
     if not start_emulator():
         return False
 
-    print(f"  Installing {os.path.basename(apk_path)}...")
-    install_proc = _run([_adb(), "install", "-r", apk_path])
-
-    if "Success" in install_proc.stdout:
-        print("-> Installation successful!")
+    if _already_installed(package_name):
+        print(f"  {package_name} already installed — skipping reinstall.")
     else:
-        print(
-            f"-> Installation failed.\nADB: {install_proc.stdout}{install_proc.stderr}"
-        )
-        return False
+        print(f"  Installing {os.path.basename(apk_path)}...")
+        install_proc = _run([_adb(), "install", "-r", apk_path], timeout=60)
+        if install_proc and "Success" in install_proc.stdout:
+            print("-> Installation successful!")
+        else:
+            err = (install_proc.stdout + install_proc.stderr) if install_proc else "command timed out"
+            print(f"-> Installation failed.\nADB: {err}")
+            return False
 
     launched = False
     try:

@@ -68,8 +68,56 @@ def download_server():
     return local_path
 
 
+def _frida_already_on_emulator(local_path: str) -> bool:
+    local_size = os.path.getsize(local_path)
+    result = _run(
+        [_adb(), "shell", "ls", "-l", "/data/local/tmp/frida-server"],
+        timeout=10,
+    )
+    if not result or result.returncode != 0:
+        return False
+    parts = result.stdout.split()
+    if len(parts) < 5:
+        return False
+    try:
+        remote_size = int(parts[4])
+        return remote_size == local_size
+    except (ValueError, IndexError):
+        return False
+
+
+def _frida_already_running() -> bool:
+    result = _run([_adb(), "shell", "pidof", "frida-server"], timeout=5)
+    return bool(result and result.stdout.strip())
+
+
 def push_server(timeout: int = 120):
     local_path = download_server()
+
+    if _frida_already_on_emulator(local_path):
+        print("  frida-server already on emulator — skipping push.", flush=True)
+        if _frida_already_running():
+            print("  frida-server already running.", flush=True)
+            return
+        print("  Starting existing frida-server...", flush=True)
+        _run([_adb(), "shell", "chmod", "755", "/data/local/tmp/frida-server"])
+        _run([_adb(), "shell", "killall", "frida-server"])
+        _run(
+            [
+                _adb(),
+                "shell",
+                "setsid",
+                "/data/local/tmp/frida-server",
+                ">",
+                "/dev/null",
+                "2>&1",
+                "&",
+            ]
+        )
+        time.sleep(3)
+        print("  frida-server running on emulator", flush=True)
+        return
+
     size_mb = os.path.getsize(local_path) / (1024 * 1024)
     print(f"  Pushing frida-server ({size_mb:.0f} MB) to emulator...", flush=True)
     print(f"  (This can take 30-90s over emulator ADB)", flush=True)
@@ -142,14 +190,10 @@ def attach(package_name):
         print(f"  Could not find PID for {package_name}")
         return False
 
-    for attempt in range(3):
-        result = _run([_adb(), "shell", "pidof", "frida-server"])
-        if not (result and result.stdout.strip()):
-            print("  Frida server not running, restarting...")
-            push_server(timeout=30)
-            time.sleep(2)
-        else:
-            break
+    if not _frida_already_running():
+        print("  Frida server not running, restarting...")
+        push_server(timeout=30)
+        time.sleep(2)
 
     log_path = os.path.join(MONITOR_DIR, "frida_hooks.log")
     log_fd = open(log_path, "w")

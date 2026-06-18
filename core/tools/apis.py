@@ -1,4 +1,4 @@
-from .base import load_dex, as_json
+from .base import get_static, as_json
 
 
 _SUSPICIOUS_APIS = {
@@ -18,14 +18,13 @@ _SUSPICIOUS_APIS = {
 
 
 def handle_search_suspicious_apis(apk_path: str, **_kw) -> str:
-    dexes = load_dex(apk_path)
+    data = get_static(apk_path)
     hits = {cat: [] for cat in _SUSPICIOUS_APIS}
-    for dex in dexes:
-        for s in dex.get_strings():
-            for cat, patterns in _SUSPICIOUS_APIS.items():
-                for p in patterns:
-                    if p in s and p not in hits[cat]:
-                        hits[cat].append(p)
+    for s in data.all_strings:
+        for cat, patterns in _SUSPICIOUS_APIS.items():
+            for p in patterns:
+                if p in s and p not in hits[cat]:
+                    hits[cat].append(p)
     return as_json({k: v for k, v in hits.items() if v})
 
 

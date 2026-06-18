@@ -50,5 +50,13 @@ def build_graph(apk_path: str, static_info: dict, evidence: dict | None = None) 
         for l in (evidence.get("logcat_hits") or [])[:10]:
             lines.append(f"LOGCAT: {_san(l)}")
 
+        detected = evidence.get("detected_techniques") or []
+        for dt in detected:
+            technique = _san(dt.get("technique", "?"))
+            confidence = _san(dt.get("confidence", "?"))
+            lines.append(f"TECH: {technique} | confidence={confidence}")
+            for ind in (dt.get("indicators") or [])[:3]:
+                lines.append(f"  INDICATOR: {_san(ind)}")
+
     lines.append(f"\n# Total: {len(lines) - 2} triples")
     return "\n".join(lines)

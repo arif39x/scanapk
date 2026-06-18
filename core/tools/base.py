@@ -1,28 +1,64 @@
 import json
 import re
-import warnings
+from dataclasses import dataclass
 from androguard.core.apk import APK
 from androguard.core.dex import DEX
 
 _URL_PATTERN = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{8,}")
 _IP_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{2,5})?\b")
 
-_apk_cache: dict[str, APK] = {}
-_dex_cache: list[DEX] = []
+
+@dataclass
+class StaticData:
+    apk: APK
+    dexes: list[DEX]
+    all_strings: list[str]
+    urls: list[str]
+    ips: list[str]
+
+
+_apk_cache: dict[str, StaticData] = {}
+
+
+def _init(apk_path: str) -> StaticData:
+    if apk_path in _apk_cache:
+        return _apk_cache[apk_path]
+
+    a = APK(apk_path)
+    dexes = [DEX(raw) for raw in a.get_all_dex()]
+
+    all_strings: list[str] = []
+    seen_urls: set[str] = set()
+    seen_ips: set[str] = set()
+    for dex in dexes:
+        for s in dex.get_strings():
+            all_strings.append(s)
+            for u in _URL_PATTERN.findall(s):
+                seen_urls.add(u)
+            for ip in _IP_PATTERN.findall(s):
+                seen_ips.add(ip)
+
+    data = StaticData(
+        apk=a,
+        dexes=dexes,
+        all_strings=all_strings,
+        urls=sorted(seen_urls),
+        ips=sorted(seen_ips),
+    )
+    _apk_cache[apk_path] = data
+    return data
+
+
+def get_static(apk_path: str) -> StaticData:
+    return _init(apk_path)
 
 
 def load_apk(apk_path: str) -> APK:
-    if apk_path not in _apk_cache:
-        _apk_cache[apk_path] = APK(apk_path)
-    return _apk_cache[apk_path]
+    return _init(apk_path).apk
 
 
 def load_dex(apk_path: str) -> list[DEX]:
-    if not _dex_cache:
-        a = load_apk(apk_path)
-        for raw in a.get_all_dex():
-            _dex_cache.append(DEX(raw))
-    return _dex_cache
+    return _init(apk_path).dexes
 
 
 def as_json(result) -> str:

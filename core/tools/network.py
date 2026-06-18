@@ -1,19 +1,11 @@
-from .base import load_dex, as_json, _URL_PATTERN, _IP_PATTERN
+from .base import get_static, as_json
 
 
 def handle_extract_network_indicators(apk_path: str, **_kw) -> str:
-    dexes = load_dex(apk_path)
-    urls = set()
-    ips = set()
-    for dex in dexes:
-        for s in dex.get_strings():
-            for u in _URL_PATTERN.findall(s):
-                urls.add(u)
-            for ip in _IP_PATTERN.findall(s):
-                ips.add(ip)
+    data = get_static(apk_path)
     return as_json({
-        "urls": sorted(urls)[:30],
-        "ips": sorted(ips)[:20],
+        "urls": data.urls[:30],
+        "ips": data.ips[:20],
     })
 
 

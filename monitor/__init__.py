@@ -57,11 +57,17 @@ def start_all(package_name: str, observe_secs: int = DEFAULT_OBSERVE_SECS) -> di
 
 
 def collect_evidence() -> dict:
-    return {
+    evidence = {
         "frida_hits": _parse_frida_log(),
         "network_requests": _parse_mitm_log(),
         "logcat_hits": _parse_logcat(),
     }
+
+    patterns = _detect_techniques(evidence)
+    if patterns:
+        evidence["detected_techniques"] = patterns
+
+    return evidence
 
 
 # ── Live tail during observation ──────────────────────────────────────────
@@ -159,3 +165,102 @@ def _parse_logcat() -> list[str]:
             if _SUSPICIOUS_LOGCAT.search(line):
                 hits.append(line.strip()[:200])
     return hits[:100]
+
+
+def _detect_techniques(evidence: dict) -> list[dict]:
+    findings = []
+    frida = evidence.get("frida_hits", []) or []
+    network = evidence.get("network_requests", []) or []
+    logcat = evidence.get("logcat_hits", []) or []
+
+    details = [h.get("detail", str(h)) if isinstance(h, dict) else str(h) for h in frida]
+
+    # ── Delayed Execution Detection ──────────────────────────────────
+
+    timer_hits = [d for d in details if d.startswith("TIMER")]
+    ui_hits = [d for d in details if d.startswith("UI")]
+    suspicious_hits = [
+        d for d in details
+        if any(k in d for k in ("NET ", "DEXLOAD ", "SMS ", "CRYPTO ", "FILE "))
+    ]
+
+    if timer_hits or ui_hits:
+        # Check if timers/UI events precede suspicious activity
+        if suspicious_hits:
+            findings.append({
+                "technique": "Delayed Execution",
+                "confidence": "HIGH",
+                "evidence": {
+                    "timers": timer_hits[:5],
+                    "ui_events": ui_hits[:5],
+                    "subsequent_suspicious": suspicious_hits[:5],
+                },
+                "indicators": [
+                    "App registers timers/delays alongside suspicious APIs",
+                    "Suspicious activity following user-interaction events suggests time-based evasion",
+                ],
+            })
+        elif len(timer_hits) >= 3:
+            findings.append({
+                "technique": "Delayed Execution (suspected)",
+                "confidence": "MEDIUM",
+                "evidence": {"timers": timer_hits[:8]},
+                "indicators": [
+                    "Multiple timer/delay mechanisms detected without clear benign purpose",
+                ],
+            })
+
+    # ── Dropper / Two-Stage Detection ─────────────────────────────────
+
+    dexload_hits = [d for d in details if d.startswith("DEXLOAD")]
+    network_urls = [r.get("url", "") for r in network]
+
+    if dexload_hits:
+        # Check if DEX loading is from network-sourced paths
+        dex_from_network = [
+            d for d in dexload_hits
+            if any(d.startswith("DEXLOAD DexClassLoader") and "http" in d.lower())
+        ]
+        inmemory_hits = [d for d in dexload_hits if "InMemoryDexClassLoader" in d]
+        reflection_hits = [d for d in details if "Method.invoke" in d or "Class.forName" in d]
+
+        indicators = []
+        if inmemory_hits:
+            indicators.append("In-memory DEX loading — common payload injection technique")
+        if dex_from_network:
+            indicators.append("DEX class loader sourcing from network path")
+        if reflection_hits and dexload_hits:
+            indicators.append("Reflection used alongside dynamic class loading — typical dropper pattern")
+        if dexload_hits:
+            indicators.append("Runtime DEX loading detected — app can execute code not in the original APK")
+
+        findings.append({
+            "technique": "Dropper / Two-Stage Payload",
+            "confidence": "HIGH" if (inmemory_hits or dex_from_network) else "MEDIUM",
+            "evidence": {
+                "dex_loads": dexload_hits[:8],
+                "reflection_calls": reflection_hits[:5],
+                "network_requests": network_urls[:5],
+            },
+            "indicators": indicators,
+        })
+
+    # ── Payload Download Detection ────────────────────────────────────
+
+    large_downloads = [d for d in details if "largePayload" in d or "largeResponse" in d]
+    download_manager = [d for d in details if "DownloadManager" in d]
+
+    if large_downloads or download_manager:
+        findings.append({
+            "technique": "Payload Download",
+            "confidence": "MEDIUM",
+            "evidence": {
+                "large_downloads": large_downloads[:5],
+                "download_manager": download_manager[:5],
+            },
+            "indicators": [
+                "App downloads large payloads — may fetch additional code or data",
+            ],
+        })
+
+    return findings

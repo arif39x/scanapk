@@ -1,11 +1,10 @@
 import re
 import warnings
 
-from .base import load_dex, as_json
+from .base import get_static, as_json
 
 
 def handle_search_strings(apk_path: str, pattern: str = "", **_kw) -> str:
-    dexes = load_dex(apk_path)
     if not pattern:
         return as_json({"count": 0, "matches": [], "error": "pattern is required"})
     try:
@@ -14,26 +13,26 @@ def handle_search_strings(apk_path: str, pattern: str = "", **_kw) -> str:
             regex = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
         return as_json({"count": 0, "matches": [], "error": str(e)})
+
+    data = get_static(apk_path)
     matches = []
     seen = set()
-    for dex in dexes:
-        for s in dex.get_strings():
-            if regex.search(s) and s not in seen:
-                seen.add(s)
-                matches.append(s[:200])
+    for s in data.all_strings:
+        if regex.search(s) and s not in seen:
+            seen.add(s)
+            matches.append(s[:200])
     return as_json({"count": len(matches), "matches": matches[:50]})
 
 
 def handle_get_raw_strings(apk_path: str, keyword: str = "", **_kw) -> str:
-    dexes = load_dex(apk_path)
+    data = get_static(apk_path)
     results = []
     seen = set()
-    for dex in dexes:
-        for s in dex.get_strings():
-            if not keyword or keyword.lower() in s.lower():
-                if s not in seen and len(s) > 3:
-                    seen.add(s)
-                    results.append(s[:200])
+    for s in data.all_strings:
+        if not keyword or keyword.lower() in s.lower():
+            if s not in seen and len(s) > 3:
+                seen.add(s)
+                results.append(s[:200])
     return as_json({"count": len(results), "strings": results[:40]})
 
 
